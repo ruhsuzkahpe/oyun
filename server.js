@@ -5,125 +5,91 @@ const path = require('path');
 
 const app = express();
 const server = http.createServer(app);
-const io = new Server(server, { cors: { origin: "*" } });
+const io = new Server(server, {
+    cors: { origin: "*" } // Tüm bağlantılara izin ver
+});
 
 app.use(express.static(path.join(__dirname, 'public')));
 
-// HARİTA VE SINIF AYARLARI
+// MOBİL OYUN AYARLARI
 const MAP_SIZE = { w: 1500, h: 1500 };
 const CLASSES = {
-    tank:   { hp: 200, speed: 4, damage: 15, reload: 10, color: '#3399ff', range: 400, bulletSpeed: 12 },
-    sniper: { hp: 90, speed: 5, damage: 50, reload: 50, color: '#00ff00', range: 1100, bulletSpeed: 28 },
-    assault:{ hp: 120, speed: 7, damage: 10, reload: 5, color: '#ff3333', range: 500, bulletSpeed: 18 }
+    tank:   { hp: 200, speed: 4, damage: 20, color: '#3399ff' },
+    sniper: { hp: 90, speed: 5, damage: 60, color: '#00ff00' },
+    assault:{ hp: 120, speed: 7, damage: 15, color: '#ff3333' }
 };
 
 let players = {};
 let bullets = [];
 
 io.on('connection', (socket) => {
-    console.log('Mobil Savaşçı:', socket.id);
+    console.log('Biri bağlandı:', socket.id);
 
+    // Oyuncuyu önce 'izleyici' gibi başlat
     players[socket.id] = {
-        x: Math.random() * MAP_SIZE.w,
-        y: Math.random() * MAP_SIZE.h,
-        classType: 'assault',
-        ...CLASSES.assault,
+        x: Math.random() * 500,
+        y: Math.random() * 500,
+        classType: null, // Henüz seçmedi
         score: 0,
+        hp: 100,
         isDead: false,
-        cooldown: 0,
         angle: 0
     };
 
+    // İŞTE BURASI: Butona basınca burası çalışacak
     socket.on('selectClass', (type) => {
+        console.log(socket.id + ' sınıf seçti: ' + type);
         if (players[socket.id] && CLASSES[type]) {
-            const oldScore = players[socket.id].score;
             players[socket.id] = { 
                 ...players[socket.id], 
                 ...CLASSES[type], 
-                classType: type,
-                hp: CLASSES[type].hp,
-                score: oldScore
+                classType: type, 
+                hp: CLASSES[type].hp 
             };
+            // Onay mesajı gönderelim ki ekran kapansın
+            socket.emit('classSelected');
         }
     });
 
-    // MOBİL GİRİŞ (JOYSTICK VERİSİ)
     socket.on('mobileInput', (data) => {
         const p = players[socket.id];
-        if (!p || p.isDead) return;
+        if (!p || !p.classType || p.isDead) return; // Sınıf seçmediyse hareket edemez
 
-        // Hareket (Joystick Vektörü)
         if (data.move.active) {
             p.x += data.move.x * p.speed;
             p.y += data.move.y * p.speed;
+            // Harita sınırı
+            p.x = Math.max(0, Math.min(MAP_SIZE.w, p.x));
+            p.y = Math.max(0, Math.min(MAP_SIZE.h, p.y));
         }
 
-        // Sınırlar
-        p.x = Math.max(20, Math.min(MAP_SIZE.w - 20, p.x));
-        p.y = Math.max(20, Math.min(MAP_SIZE.h - 20, p.y));
-
-        // Ateş Etme (Sağ Joystick)
-        if (p.cooldown > 0) p.cooldown--;
-
-        if (data.shoot.active && p.cooldown <= 0) {
-            p.angle = data.shoot.angle; // Oyuncunun yönünü güncelle
-            p.cooldown = p.reload;
-            
-            bullets.push({
-                x: p.x, y: p.y,
-                vx: Math.cos(p.angle) * p.bulletSpeed,
-                vy: Math.sin(p.angle) * p.bulletSpeed,
-                damage: p.damage,
-                range: p.range,
-                traveled: 0,
-                owner: socket.id
-            });
+        if (data.shoot.active) {
+            // Basit ateşleme mantığı (Hızlı çözüm için)
+            if(Math.random() > 0.8) { // Mermi sınırlaması
+                 bullets.push({
+                    x: p.x, y: p.y,
+                    vx: Math.cos(data.shoot.angle) * 15,
+                    vy: Math.sin(data.shoot.angle) * 15,
+                    owner: socket.id,
+                    life: 100
+                });
+            }
         }
     });
 
     socket.on('disconnect', () => delete players[socket.id]);
 });
 
-// FİZİK MOTORU
+// Basit Fizik Döngüsü
 setInterval(() => {
-    for (let i = bullets.length - 1; i >= 0; i--) {
-        let b = bullets[i];
+    bullets.forEach((b, i) => {
         b.x += b.vx;
         b.y += b.vy;
-        b.traveled += Math.hypot(b.vx, b.vy);
-
-        if (b.traveled > b.range || b.x < 0 || b.x > MAP_SIZE.w || b.y < 0 || b.y > MAP_SIZE.h) {
-            bullets.splice(i, 1);
-            continue;
-        }
-
-        for (let id in players) {
-            let p = players[id];
-            if (b.owner !== id && !p.isDead) {
-                if (Math.hypot(b.x - p.x, b.y - p.y) < 30) { // Vurulma Alanı
-                    p.hp -= b.damage;
-                    io.emit('hitEffect', {x: b.x, y: b.y, color: '#fff'});
-                    
-                    if (p.hp <= 0) {
-                        p.isDead = true;
-                        if (players[b.owner]) players[b.owner].score += 100;
-                        setTimeout(() => {
-                            if (players[id]) {
-                                players[id].isDead = false;
-                                players[id].hp = CLASSES[players[id].classType].hp;
-                                players[id].x = Math.random() * MAP_SIZE.w;
-                                players[id].y = Math.random() * MAP_SIZE.h;
-                            }
-                        }, 3000);
-                    }
-                    bullets.splice(i, 1);
-                    break;
-                }
-            }
-        }
-    }
+        b.life--;
+        if(b.life <= 0) bullets.splice(i, 1);
+    });
     io.emit('state', { players, bullets });
 }, 1000 / 60);
 
 const PORT = process.env.PORT || 3000;
-server.listen(PORT, () => console.log(`Mobil Sunucu ${PORT} portunda!`));
+server.listen(PORT, () => console.log(`Sunucu Hazır: ${PORT}`));
